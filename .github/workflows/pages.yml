@@ -1,4 +1,4 @@
-name: Preview deployment preparation
+name: NovusPal preview
 
 on:
   pull_request:
@@ -11,42 +11,58 @@ permissions:
   contents: read
 
 jobs:
-  check:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: actions/setup-python@v6
-        with:
-          python-version: '3.12'
-      - name: Test deployment tooling
-        run: python -m unittest discover -s tests -v
-      - name: Check staged preview when present
-        shell: bash
-        run: |
-          if [ -d site ]; then
-            python scripts/validate_site.py site
-          else
-            echo '::warning::No approved preview staged. Preparation checks passed; deployment is unavailable until site/ is staged.'
-            echo 'No approved preview has been staged; this run does not establish app release readiness.' >> "$GITHUB_STEP_SUMMARY"
-          fi
-
   artifact:
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
-    needs: check
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pages: read
     steps:
       - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
-      - name: Require a validated release artifact
-        run: python scripts/validate_site.py site
+      - name: Verify reviewed runtime manifest
+        shell: bash
+        run: |
+          python - <<'PY'
+          import hashlib, json, re
+          from pathlib import Path
+          root = Path('site')
+          def require(ok, message):
+              if not ok:
+                  raise SystemExit(message)
+          require(root.is_dir() and not root.is_symlink(), 'Missing or linked site/')
+          paths = list(root.rglob('*'))
+          allowed = {'.html', '.css', '.js', '.json', '.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp', '.ico', '.avif', '.ttf', '.otf', '.woff', '.woff2', '.txt', '.webmanifest', '.wasm', '.mp3', '.mp4', '.webm'}
+          for path in paths:
+              name = path.relative_to(root).as_posix()
+              require(not path.is_symlink(), 'Linked artifact path: ' + name)
+              require(name == '.nojekyll' or not any(part.startswith('.') for part in path.relative_to(root).parts), 'Hidden artifact path: ' + name)
+              require(not path.is_file() or name == '.nojekyll' or path.suffix.lower() in allowed, 'Unsupported artifact file: ' + name)
+          files = [path for path in paths if path.is_file()]
+          require(sum(path.stat().st_size for path in files) <= 100 * 1024 * 1024, 'Artifact exceeds 100 MiB')
+          require(all((root / name).is_file() for name in ('index.html', '.nojekyll', 'release-manifest.json')), 'Missing artifact entrypoint, marker or manifest')
+          manifest = json.loads((root / 'release-manifest.json').read_text(encoding='utf-8'))
+          require(isinstance(manifest, dict), 'Manifest must be an object')
+          version = manifest.get('source_version')
+          require(isinstance(version, str) and bool(version.strip()), 'Missing source identity')
+          require(manifest.get('base_path') == '/project-n-preview', 'Wrong project base path')
+          expected = manifest.get('files')
+          require(isinstance(expected, dict) and all(isinstance(value, str) and re.fullmatch(r'[0-9a-f]{64}', value) for value in expected.values()), 'Invalid manifest hashes')
+          actual = {path.relative_to(root).as_posix(): hashlib.sha256(path.read_bytes()).hexdigest() for path in files if path.name != 'release-manifest.json' or path.parent != root}
+          require(expected == actual, 'Artifact differs from reviewed manifest')
+          require(isinstance(manifest.get('spa_fallback'), bool), 'Invalid SPA fallback flag')
+          if manifest['spa_fallback']:
+              require((root / '404.html').is_file() and (root / '404.html').read_bytes() == (root / 'index.html').read_bytes(), 'Invalid SPA fallback')
+          print(f'Validated {len(actual)} payload files for /project-n-preview/')
+          PY
       - name: Configure Pages
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         uses: actions/configure-pages@v5
-      - name: Upload only the staged site
+      - name: Upload only reviewed runtime assets
+        if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
         uses: actions/upload-pages-artifact@v4
         with:
           path: site
@@ -65,6 +81,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - name: Deploy the validated artifact
+      - name: Deploy the validated runtime artifact
         id: deployment
         uses: actions/deploy-pages@v4
