@@ -1,0 +1,70 @@
+name: Preview deployment preparation
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Test deployment tooling
+        run: python -m unittest discover -s tests -v
+      - name: Check staged preview when present
+        shell: bash
+        run: |
+          if [ -d site ]; then
+            python scripts/validate_site.py site
+          else
+            echo '::warning::No approved preview staged. Preparation checks passed; deployment is unavailable until site/ is staged.'
+            echo 'No approved preview has been staged; this run does not establish app release readiness.' >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  artifact:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: check
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - name: Require a validated release artifact
+        run: python scripts/validate_site.py site
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+      - name: Upload only the staged site
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: site
+
+  deploy:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    needs: artifact
+    runs-on: ubuntu-latest
+    concurrency:
+      group: github-pages
+      cancel-in-progress: false
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy the validated artifact
+        id: deployment
+        uses: actions/deploy-pages@v4
