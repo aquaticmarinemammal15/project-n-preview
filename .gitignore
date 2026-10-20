@@ -7,3 +7,6 @@ __pycache__/
 *.pem
 *.key
 node_modules/
+
+# Expo exports keep bundled assets under site/assets/node_modules/; publish them.
+!site/assets/node_modules/
